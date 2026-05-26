@@ -21,12 +21,19 @@
 
     <div class="nav">
         <button id="btn-tab1" class="active" onclick="switchTab('tab1')">Табличная форма (Клиенты)</button>
+        <button id="btn-tab3" onclick="switchTab('tab3')">Ленточная форма (Клиенты)</button>
         <button id="btn-tab2" onclick="switchTab('tab2')">Поиск и Процедуры</button>
+        <button id="btn-tab4" onclick="switchTab('tab4')">Модифицирующее представление</button>
     </div>
 
     <div id="tab1" class="tab-content active">
         <h2>Список клиентов автосалона</h2>
-        <button onclick="loadClients()">Обновить данные</button>
+        <div style="margin-bottom: 10px; display: flex; gap: 10px; align-items: center;">
+            <button onclick="loadFirstPage()">Обновить данные</button>
+            <button id="btn-table-prev" onclick="loadPrevPage()">◀ Назад</button>
+            <span id="table-page-info" style="font-weight: bold;">Страница: 1</span>
+            <button id="btn-table-next" onclick="loadNextPage()">Вперед ▶</button>
+        </div>
         <table id="clients-table">
             <thead>
                 <tr>
@@ -47,6 +54,51 @@
         <div id="proc-result" style="margin-top:20px; font-weight:bold; color:#007acc;"></div>
     </div>
 
+    <div id="tab3" class="tab-content">
+        <h2>Ленточное представление клиентов</h2>
+        <span id="tape_selected_item"></span>
+        <div style="display: flex;">
+            <button id="btn_tape_prev" onclick="tapePrev()">Prev</button>
+            <button id="btn_tape_next" onclick="tapeNext()">Next</button>
+        </div>
+    </div>
+
+    <div id="tab4" class="tab-content">
+        <h2>Вставка в модифицирующее представление</h2>
+        <p style="color: #666; font-size: 14px;">
+            * Примечание для защиты: Представление принимает машины только с ценой > 50 000.
+        </p>
+        
+        <form id="view-insert-form" onsubmit="insertIntoView(event)">
+            <div class="form-group">
+                <label>Марка: </label><br>
+                <input type="text" id="v-brand" value="Porsche" required>
+            </div>
+            <div class="form-group">
+                <label>Модель: </label><br>
+                <input type="text" id="v-model" value="911" required>
+            </div>
+            <div class="form-group">
+                <label>VIN (17 символов, уникальный): </label><br>
+                <input type="text" id="v-vin" value="VINTESTCHECK00001" maxlength="17" required>
+            </div>
+            <div class="form-group">
+                <label>Год выпуска: </label><br>
+                <input type="number" id="v-year" value="2023" min="2000" required>
+            </div>
+            <div class="form-group">
+                <label>Стоимость (руб): </label><br>
+                <input type="number" id="v-cost" value="120000" required>
+            </div>
+            
+            <button type="submit" style="background: #007acc; color: white; border: none; padding: 10px 20px;">
+                Выполнить INSERT в View
+            </button>
+        </form>
+
+        <div id="insert-status" style="margin-top: 15px; padding: 10px; border-radius: 4px; display: none;"></div>
+    </div>
+
     <script>
         const sql = require('mssql');
 
@@ -54,7 +106,7 @@
         const config = {
             user: 'sa',
             password: 'YourStrongPassword123',
-            server: 'localhost', 
+            server: '127.0.0.1', 
             database: 'AutoSalon',
             options: {
                 encrypt: false,
@@ -62,23 +114,82 @@
             }
         };
 
+        var tape_selected_item = null;
+
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
             document.querySelectorAll('.nav button').forEach(el => el.classList.remove('active'));
             document.getElementById(tabId).classList.add('active');
-            if(tabId === 'tab1') document.getElementById('btn-tab1').classList.add('active');
-            if(tabId === 'tab2') document.getElementById('btn-tab2').classList.add('active');
+            document.getElementById(`btn-${tabId}`).classList.add('active');
+        }
+        
+        const PAGE_SIZE = 15;          // Сколько строк выводим за раз
+        let currentPage = 1;           // Номер текущей страницы
+        let firstIdOnPage = null;      // Минимальный ClientID на текущей странице
+        let lastIdOnPage = null;       // Максимальный ClientID на текущей странице
+        let pageHistory = {};          // История для возврата назад: { номер_страницы: стартовый_id }
+
+        // Точка входа: загрузка самой первой страницы
+        async function loadFirstPage() {
+            currentPage = 1;
+            pageHistory = { 1: 0 }; // Для 1-й страницы стартовый ID = 0
+            document.getElementById('btn-table-prev').setAttribute('disabled', 'true');
+            await fetchPageData('next', 0);
         }
 
-        async function loadClients() {
+        // Кнопка "Вперед"
+        async function loadNextPage() {
+            currentPage++;
+            pageHistory[currentPage] = lastIdOnPage; // Запоминаем, где остановились
+            document.getElementById('btn-table-prev').removeAttribute('disabled');
+            await fetchPageData('next', lastIdOnPage);
+        }
+
+        // Кнопка "Назад"
+        async function loadPrevPage() {
+            if (currentPage <= 1) return;
+            currentPage--;
+            
+            if (currentPage === 1) {
+                document.getElementById('btn-table-prev').setAttribute('disabled', 'true');
+            }
+            
+            const startId = pageHistory[currentPage];
+            await fetchPageData('next', startId);
+        }
+
+        // Основная функция запроса к MS SQL
+        async function fetchPageData(direction, anchorId) {
             try {
                 let pool = await sql.connect(config);
-                let result = await pool.request().query('SELECT ClientID, LastName, ClientPhone, BaseSign FROM Clients');
                 
+                // Выбираем строго PAGE_SIZE строк, которые идут ПОСЛЕ anchorId
+                let result = await pool.request()
+                    .input('anchorId', sql.Int, anchorId)
+                    .input('limit', sql.Int, PAGE_SIZE)
+                    .query(`
+                        SELECT TOP (@limit) ClientID, LastName, ClientPhone, BaseSign 
+                        FROM Clients 
+                        WHERE ClientID > @anchorId 
+                        ORDER BY ClientID ASC
+                    `);
+                
+                const rows = result.recordset;
                 const tbody = document.querySelector('#clients-table tbody');
                 tbody.innerHTML = '';
                 
-                result.recordset.forEach(row => {
+                if (rows.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">Данные кончились</td></tr>';
+                    document.getElementById('btn-table-next').setAttribute('disabled', 'true');
+                    return;
+                }
+
+                // Фиксируем граничные ID для следующего шага
+                firstIdOnPage = rows[0].ClientID;
+                lastIdOnPage = rows[rows.length - 1].ClientID;
+
+                // Отрисовка строк
+                rows.forEach(row => {
                     tbody.innerHTML += `
                         <tr>
                             <td>${row.ClientID}</td>
@@ -89,17 +200,72 @@
                         </tr>
                     `;
                 });
+
+                // Обновляем интерфейс
+                document.getElementById('table-page-info').innerText = `Страница: ${currentPage}`;
+                
+                // Проверяем, есть ли данные дальше, чтобы вовремя тушить кнопку "Вперед"
+                let checkNext = await pool.request()
+                    .input('lastId', sql.Int, lastIdOnPage)
+                    .query('SELECT TOP 1 ClientID FROM Clients WHERE ClientID > @lastId');
+                
+                if (checkNext.recordset.length === 0) {
+                    document.getElementById('btn-table-next').setAttribute('disabled', 'true');
+                } else {
+                    document.getElementById('btn-table-next').removeAttribute('disabled');
+                }
+
             } catch (err) {
-                alert('Ошибка БД: ' + err.message);
+                alert('Ошибка пагинации БД: ' + err.message);
             }
         }
 
+        // async function deleteClient(id) {
+        //     if(!confirm('Удалить клиента?')) return;
+        //     // try {
+        //     //     let pool = await sql.connect(config);
+        //     //     await pool.request()
+        //     //         .input('id', sql.Int, id)
+        //     //         .query('DELETE FROM TestDrives WHERE ClientID = @id');
+        //     //     await pool.request()
+        //     //         .input('id', sql.Int, id)
+        //     //         .query('DELETE FROM Clients WHERE ClientID = @id');
+
+        //     //     // Перезагружаем текущую страницу с ее сохраненного стартового ID
+        //     //     await fetchPageData('next', pageHistory[currentPage]);
+        //     // } catch (err) {
+        //     //     alert('Ошибка при удалении: ' + err.message);
+        //     // }
+        // }
+        const { ipcRenderer } = require('electron');
+
         async function deleteClient(id) {
-            if(!confirm('Удалить клиента?')) return;
             try {
+                // 1. Запрашиваем нативное окно у Main-процесса (передаем ID для контекста, если нужно)
+                const confirmed = await ipcRenderer.invoke('show-confirm-delete', `ID: ${id}`);
+                
+                // Если пользователь нажал "Отмена" — просто выходим из функции
+                if (!confirmed) return;
+
                 let pool = await sql.connect(config);
-                await pool.request().input('id', sql.Int, id).query('DELETE FROM Clients WHERE ClientID = @id');
-                loadClients();
+                await pool.request()
+                    .input('id', sql.Int, id)
+                    .query('DELETE FROM TestDrives WHERE ClientID = @id');
+                await pool.request()
+                    .input('id', sql.Int, id)
+                    .query('DELETE FROM Contracts WHERE ClientID = @id');
+                await pool.request()
+                    .input('id', sql.Int, id)
+                    .query('DELETE FROM Clients WHERE ClientID = @id');
+
+                ipcRenderer.invoke('show-native-dialog', {
+                    type: 'info',
+                    title: 'Успех',
+                    message: 'Клиент и его тест-драйвы и контракты успешно удалены.'
+                });
+                await fetchPageData('next', pageHistory[currentPage]);
+
+                window.focus();
             } catch (err) {
                 alert('Ошибка при удалении: ' + err.message);
             }
@@ -125,7 +291,136 @@
             }
         }
 
-        window.onload = loadClients;
+        async function insertIntoView(event) {
+            event.preventDefault();
+
+            const brand = document.getElementById('v-brand').value;
+            const model = document.getElementById('v-model').value;
+            const vin = document.getElementById('v-vin').value;
+            const year = parseInt(document.getElementById('v-year').value);
+            const cost = parseFloat(document.getElementById('v-cost').value);
+
+            const statusDiv = document.getElementById('insert-status');
+            statusDiv.style.display = 'block';
+            statusDiv.style.background = '#eee';
+            statusDiv.style.color = '#333';
+            statusDiv.innerHTML = 'Отправка запроса...';
+
+            try {
+                let pool = await sql.connect(config);
+                
+                await pool.request()
+                    .input('brand', sql.VarChar(50), brand)
+                    .input('model', sql.VarChar(50), model)
+                    .input('vin', sql.VarChar(17), vin)
+                    .input('year', sql.Int, year)
+                    .input('cost', sql.Decimal(12, 2), cost)
+                    .query(`
+                        INSERT INTO v_ExpensiveCars (Brand, Model, VIN, Year, Cost) 
+                        VALUES (@brand, @model, @vin, @year, @cost)
+                    `);
+
+                // Если дошли сюда — всё ок
+                statusDiv.style.background = '#d4edda';
+                statusDiv.style.color = '#155724';
+                statusDiv.innerHTML = `<b>Успех!</b> Строка успешно добавлена через представление. Проверьте таблицу Cars.`;
+                
+                // Обновляем общую таблицу клиентов, если она привязана
+                if (typeof loadClients === "function") loadClients();
+
+            } catch (err) {
+                statusDiv.style.background = '#f8d7da';
+                statusDiv.style.color = '#721c24';
+                
+                if (err.message.includes('CHECK OPTION')) {
+                    statusDiv.innerHTML = `<b>Ошибка WITH CHECK OPTION!</b><br>
+                                        БД отклонила инсерт, так как Стоимость (${cost}) не удовлетворяет условию представления (Cost > 50000).`;
+                } else if (err.message.includes('PRIMARY KEY') || err.message.includes('UNIQUE')) {
+                    statusDiv.innerHTML = `<b>Ошибка уникальности!</b><br>Машина с таким VIN уже существует в базе.`;
+                } else {
+                    statusDiv.innerHTML = `<b>Ошибка БД:</b> ${err.message}`;
+                }
+            }
+        }
+
+        function parseClientToHTML(client) {
+            if (!client || typeof client !== 'object') {
+                return '<p>Некорректные данные клиента</p>';
+            }
+            
+            return `
+                <div style="border: 1px solid #ddd; border-radius: 8px; padding: 16px; max-width: 400px; font-family: Arial, sans-serif;">
+                    <h3 style="margin-top: 0; color: #333;">Информация о клиенте</h3>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="display: inline-block; width: 130px;">ClientID:</strong>
+                        <span>${client.ClientID ?? '—'}</span>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="display: inline-block; width: 130px;">ClientPassport:</strong>
+                        <span>${client.ClientPassport ?? '—'}</span>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="display: inline-block; width: 130px;">ClientPhone:</strong>
+                        <span>${client.ClientPhone ?? '—'}</span>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="display: inline-block; width: 130px;">FirstName:</strong>
+                        <span>${client.FirstName ?? '—'}</span>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <strong style="display: inline-block; width: 130px;">LastName:</strong>
+                        <span>${client.LastName ?? '—'}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadTapeSelected() {
+            try {
+                let pool = await sql.connect(config);
+                let result = await pool.request()
+                    .query('SELECT TOP 1 ClientID, LastName, FirstName, ClientPassport, ClientPhone FROM Clients ORDER BY ClientID asc');
+                tape_selected_item = result.recordset[0];
+                document.getElementById('btn_tape_prev').setAttribute("disabled", "");
+                document.getElementById('tape_selected_item').innerHTML = parseClientToHTML(tape_selected_item);
+            } catch (err) {
+                alert('error: ' + err.message);
+            }
+        }
+
+        async function tapeNext() {
+            try {
+                let pool = await sql.connect(config);
+                let result = await pool.request()
+                    .input('id', sql.Int, tape_selected_item.ClientID)
+                    .query('SELECT TOP 2 ClientID, LastName, FirstName, ClientPassport, ClientPhone FROM Clients WHERE ClientID > @id ORDER BY ClientID asc');
+                tape_selected_item = result.recordset[0];
+                if (result.recordset.length !== 2) document.getElementById('btn_tape_next').setAttribute("disabled", "");
+                document.getElementById('btn_tape_prev').removeAttribute("disabled");
+                document.getElementById('tape_selected_item').innerHTML = parseClientToHTML(tape_selected_item);
+            } catch (err) {
+                alert('error: ' + err.message);
+            }
+        }
+        async function tapePrev() {
+            try {
+                let pool = await sql.connect(config);
+                let result = await pool.request()
+                    .input('id', sql.Int, tape_selected_item.ClientID)
+                    .query('SELECT TOP 2 ClientID, LastName, FirstName, ClientPassport, ClientPhone FROM Clients WHERE ClientID < @id ORDER BY ClientID desc');
+                tape_selected_item = result.recordset[0];
+                if (result.recordset.length !== 2) document.getElementById('btn_tape_prev').setAttribute("disabled", "");
+                document.getElementById('btn_tape_next').removeAttribute("disabled");
+                document.getElementById('tape_selected_item').innerHTML = parseClientToHTML(tape_selected_item);
+            } catch (err) {
+                alert('error: ' + err.message);
+            }
+        }
+
+        window.onload = async () => {
+            await loadFirstPage();
+            await loadTapeSelected();
+        };
     </script>
 </body>
 </html>
