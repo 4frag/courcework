@@ -1,0 +1,6 @@
+{
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "mssql": "^12.5.4"
+  }
+}

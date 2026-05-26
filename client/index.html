@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Управление Автосалоном</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
+        .nav { display: flex; gap: 10px; margin-bottom: 20px; }
+        button { padding: 10px 15px; cursor: pointer; border: 1px solid #ccc; background: #fff; }
+        button.active { background: #007acc; color: white; }
+        .tab-content { display: none; background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .tab-content.active { display: block; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .form-group { margin-bottom: 15px; }
+        input { padding: 8px; width: 200px; }
+    </style>
+</head>
+<body>
+
+    <div class="nav">
+        <button id="btn-tab1" class="active" onclick="switchTab('tab1')">Табличная форма (Клиенты)</button>
+        <button id="btn-tab2" onclick="switchTab('tab2')">Поиск и Процедуры</button>
+    </div>
+
+    <div id="tab1" class="tab-content active">
+        <h2>Список клиентов автосалона</h2>
+        <button onclick="loadClients()">Обновить данные</button>
+        <table id="clients-table">
+            <thead>
+                <tr>
+                    <th>ID</th><th>Фамилия</th><th>Телефон</th><th>Тип лица (Юр/Физ)</th><th>Действие</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="tab2" class="tab-content">
+        <h2>Поиск финансовой статистики клиента</h2>
+        <div class="form-group">
+            <label>ID Клиента: </label>
+            <input type="number" id="client-id-input" value="1">
+            <button onclick="runProcedure()">Вызвать Хранимую Процедуру</button>
+        </div>
+        <div id="proc-result" style="margin-top:20px; font-weight:bold; color:#007acc;"></div>
+    </div>
+
+    <script>
+        const sql = require('mssql');
+
+        // Конфиг подключения к MS SQL
+        const config = {
+            user: 'sa',
+            password: 'YourStrongPassword123',
+            server: 'localhost', 
+            database: 'AutoSalon',
+            options: {
+                encrypt: false,
+                trustServerCertificate: true
+            }
+        };
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav button').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            if(tabId === 'tab1') document.getElementById('btn-tab1').classList.add('active');
+            if(tabId === 'tab2') document.getElementById('btn-tab2').classList.add('active');
+        }
+
+        async function loadClients() {
+            try {
+                let pool = await sql.connect(config);
+                let result = await pool.request().query('SELECT ClientID, LastName, ClientPhone, BaseSign FROM Clients');
+                
+                const tbody = document.querySelector('#clients-table tbody');
+                tbody.innerHTML = '';
+                
+                result.recordset.forEach(row => {
+                    tbody.innerHTML += `
+                        <tr>
+                            <td>${row.ClientID}</td>
+                            <td>${row.LastName}</td>
+                            <td>${row.ClientPhone || '—'}</td>
+                            <td>${row.BaseSign ? 'Юр. лицо' : 'Физ. лицо'}</td>
+                            <td><button onclick="deleteClient(${row.ClientID})" style="color:red;">Удалить</button></td>
+                        </tr>
+                    `;
+                });
+            } catch (err) {
+                alert('Ошибка БД: ' + err.message);
+            }
+        }
+
+        async function deleteClient(id) {
+            if(!confirm('Удалить клиента?')) return;
+            try {
+                let pool = await sql.connect(config);
+                await pool.request().input('id', sql.Int, id).query('DELETE FROM Clients WHERE ClientID = @id');
+                loadClients();
+            } catch (err) {
+                alert('Ошибка при удалении: ' + err.message);
+            }
+        }
+
+        async function runProcedure() {
+            const clientId = document.getElementById('client-id-input').value;
+            try {
+                let pool = await sql.connect(config);
+                let result = await pool.request()
+                    .input('ClientID', sql.Int, clientId)
+                    .execute('sp_GetClientReport'); 
+                
+                if (result.recordset && result.recordset.length > 0) {
+                    let data = result.recordset[0];
+                    document.getElementById('proc-result').innerHTML = 
+                        `Клиент: ${data.LastName} | Всего покупок на сумму: ${data.TotalSpent} руб.`;
+                } else {
+                    document.getElementById('proc-result').innerHTML = 'Данные по клиенту не найдены.';
+                }
+            } catch (err) {
+                alert('Ошибка вызова процедуры: ' + err.message);
+            }
+        }
+
+        window.onload = loadClients;
+    </script>
+</body>
+</html>
