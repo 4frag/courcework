@@ -19,4 +19,5 @@ start-services:
 start:
 	make start-services
 	make install-schema
+	npm i
 	make run
